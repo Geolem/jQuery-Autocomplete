@@ -1,0 +1,65 @@
+name: Release
+
+# Fires when a tag like v2.0.0 is pushed. Validates the tag matches
+# package.json, runs the full CI sweep, publishes to npm with provenance
+# (OIDC via Trusted Publisher — no NPM_TOKEN needed), then opens a GitHub
+# Release with auto-generated notes.
+#
+# One-time setup required on npmjs.com before this can fire:
+#   npmjs.com -> Package settings -> "Trusted publisher" ->
+#     repo: tkirda/jQuery-Autocomplete
+#     workflow: release.yml
+#     environment: npm-publish
+# See https://docs.npmjs.com/trusted-publishers
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      id-token: write   # OIDC token for npm provenance
+      contents: write   # creating the GitHub Release
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          # Node 24 ships npm 11.x natively, which has Trusted Publisher
+          # OIDC publish support (landed in npm 11.5.1). Node 20 ships
+          # npm 10.x and would need a separate `npm install -g npm@latest`.
+          # The CI workflow stays on Node 20 to verify package.json
+          # engines.node minimum — but for releasing we want the modern CLI.
+          node-version: 24
+          cache: npm
+          # Deliberately no `registry-url:` — that flag makes setup-node
+          # write an .npmrc with `_authToken=${NODE_AUTH_TOKEN}` which
+          # overrides OIDC. We want npm to use the native OIDC auth flow.
+
+      - run: npm ci
+
+      - name: Verify tag matches package.json version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $pkg_version" >&2
+            exit 1
+          fi
+
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - run: npm publish --provenance --access public
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
